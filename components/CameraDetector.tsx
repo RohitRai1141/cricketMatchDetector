@@ -95,7 +95,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
-            width: { ideal: 1280 },
+            width: { ideal: 1280 }, 
             height: { ideal: 720 }
           },
           audio: false,
@@ -355,14 +355,14 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
           if (perimeter > 0) {
             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
 
-            // Check circularity (lenient for motion blur)
-            if (circularity > 0.25) {
+            // Stricter circularity (0.4) to reduce random noise
+            if (circularity > 0.4) {
               let circle = cv.minEnclosingCircle(contour);
               let rect = cv.boundingRect(contour);
               let aspectRatio = Math.max(rect.width, rect.height) / Math.min(rect.width, rect.height);
 
-              // Balls should be roughly circular
-              if (aspectRatio < 2.0) {
+              // Stricter aspect ratio
+              if (aspectRatio < 1.8) {
                 allDetectedCircles.push({
                   center: circle.center,
                   radius: circle.radius,

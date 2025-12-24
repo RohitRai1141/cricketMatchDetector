@@ -22,6 +22,8 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   // OpenCV State
   const [cvReady, setCvReady] = useState(false);
@@ -88,17 +90,19 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     return () => clearInterval(checkCv);
   }, []);
 
-  // Initialize Camera
+  // Initialize Camera & Recorder
   useEffect(() => {
+    let stream: MediaStream | null = null;
+
     const startCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 }, 
             height: { ideal: 720 }
           },
-          audio: false,
+          audio: false, // Audio often causes permission issues or feedback, kept off for now
         });
 
         if (videoRef.current) {
@@ -111,6 +115,26 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
           };
         }
 
+        // Initialize MediaRecorder
+        if (stream && MediaRecorder.isTypeSupported('video/webm')) {
+            const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            
+            recorder.ondataavailable = (e) => {
+              if (e.data.size > 0) chunksRef.current.push(e.data);
+            };
+
+            recorder.onstop = () => {
+              if (chunksRef.current.length > 0 && onVideoAvailable) {
+                const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+                onVideoAvailable(blob);
+              }
+              chunksRef.current = [];
+            };
+
+            recorder.start(1000); // Save chunks every second
+            mediaRecorderRef.current = recorder;
+        }
+
         setTimeout(() => setIsWarmingUp(false), 2000);
       } catch (err) {
         console.error("Camera error:", err);
@@ -120,9 +144,19 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     startCamera();
 
     return () => {
+      // Stop Recorder
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      
+      // Stop Camera Stream
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+
       cleanupMats();
     };
-  }, []);
+  }, []); // Run once on mount
 
   const cleanupMats = () => {
     const m = matsRef.current;

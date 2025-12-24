@@ -320,7 +320,7 @@ export default function App() {
     const team2Name = matchState.innings === 2 ? matchState.battingTeam : matchState.bowlingTeam;
 
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-6 overflow-y-auto">
+      <div className="h-screen bg-gray-900 text-white p-6 overflow-y-auto">
         <h1 className="text-3xl font-bold mb-6 text-emerald-400 flex items-center gap-3">
             <Trophy className="text-yellow-400" size={32} />
             Match Summary
@@ -423,15 +423,26 @@ export default function App() {
           </div>
         )}
 
-        <button 
-          onClick={() => {
-              setMatchVideoBlob(null);
-              setScreen(AppScreen.SETUP);
-          }}
-          className="w-full mt-8 bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/50 py-4 rounded-xl font-bold transition-all active:scale-95"
-        >
-          Start New Match
-        </button>
+        <div className="mt-8 space-y-3">
+          {matchVideoBlob && (
+            <button 
+              onClick={downloadVideo}
+              className="w-full bg-gray-700 hover:bg-gray-600 border border-gray-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95"
+            >
+              <Video size={20} className="text-red-400" /> Download Match Video
+            </button>
+          )}
+
+          <button 
+            onClick={() => {
+                setMatchVideoBlob(null);
+                setScreen(AppScreen.SETUP);
+            }}
+            className="w-full bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/50 py-4 rounded-xl font-bold transition-all active:scale-95"
+          >
+            Start New Match
+          </button>
+        </div>
       </div>
     );
   }

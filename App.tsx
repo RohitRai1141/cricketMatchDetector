@@ -1,11 +1,86 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Mic, Undo2, XCircle, Video, Trophy, Star, Lightbulb, Activity, ArrowRight } from 'lucide-react';
+import { Mic, Undo2, XCircle, Video, Trophy, Star, Lightbulb, Activity, ArrowRight, Save } from 'lucide-react';
 import CameraDetector from './components/CameraDetector';
 import ScoreBoard from './components/ScoreBoard';
 import SetupScreen from './components/SetupScreen';
 import { AppScreen, MatchState, BallEvent } from './types';
 import { INITIAL_MATCH_STATE } from './constants';
-import { generateMatchSummary, MatchSummaryData } from './services/geminiService';
+
+// --- Local Match Summary Logic (Previously in geminiService.ts) ---
+export interface MatchSummaryData {
+  headline: string;
+  body: string;
+  highlights: string[];
+  advice: string;
+}
+
+const generateMatchSummary = async (matchState: MatchState): Promise<MatchSummaryData | string> => {
+  // 1. Determine Result Headline
+  const headline = matchState.matchResult || "Match In Progress";
+
+  // 2. Statistics Calculation
+  const runRate = (matchState.totalRuns / Math.max(0.1, matchState.currentOver + matchState.currentBall/6)).toFixed(2);
+  const totalBalls = matchState.currentOver * 6 + matchState.currentBall;
+  const dotBalls = matchState.history.filter(b => b.runs === 0 && !b.isWicket).length;
+  const boundaries = matchState.history.filter(b => b.runs === 4 || b.runs === 6).length;
+  
+  // 3. Generate Highlights
+  const highlights: string[] = [];
+  
+  // Find big overs (>10 runs)
+  const runsPerOver: Record<number, number> = {};
+  matchState.history.forEach(b => {
+    runsPerOver[b.over] = (runsPerOver[b.over] || 0) + b.runs;
+  });
+  
+  Object.entries(runsPerOver).forEach(([over, runs]) => {
+    if (runs >= 10) highlights.push(`Big Over: ${runs} runs scored in Over ${Number(over) + 1}.`);
+  });
+
+  // Wickets
+  if (matchState.wickets > 0) {
+      highlights.push(`Bowling team took ${matchState.wickets} wickets.`);
+  } else {
+      highlights.push(`Batting team lost 0 wickets.`);
+  }
+
+  highlights.push(`${boundaries} Boundaries hit.`);
+
+  // 4. Generate Body Analysis
+  let body = "";
+  if (matchState.innings === 2 && matchState.target) {
+      const required = matchState.target - matchState.totalRuns;
+      if (matchState.isMatchOver) {
+           body = `${matchState.matchResult}. The batting team ended with a run rate of ${runRate}.`;
+      } else {
+           body = `Chasing ${matchState.target}, the team needs ${required} more runs. Current Run Rate is ${runRate}.`;
+      }
+  } else {
+      body = `First Innings complete. Team scored ${matchState.totalRuns} for ${matchState.wickets}. Run Rate: ${runRate}.`;
+  }
+
+  // 5. Tactical Advice
+  let advice = "";
+  const dotBallPercentage = (dotBalls / Math.max(1, totalBalls)) * 100;
+  
+  if (parseFloat(runRate) < 6) {
+      advice = "Run rate is low. Try to rotate strike more often to keep the scoreboard ticking.";
+  } else if (matchState.wickets > (matchState.playersPerTeam / 2)) {
+      advice = "Lost too many wickets early. Middle order needs to consolidate.";
+  } else if (dotBallPercentage > 50) {
+      advice = `Dot ball percentage is high (${dotBallPercentage.toFixed(0)}%). Focus on finding gaps.`;
+  } else {
+      advice = "Great momentum. Keep playing aggressively.";
+  }
+
+  return {
+    headline,
+    body,
+    highlights: highlights.slice(0, 5), // Top 5 highlights
+    advice
+  };
+};
+// ------------------------------------------------------------------
 
 export default function App() {
   const [screen, setScreen] = useState<AppScreen>(AppScreen.SETUP);
@@ -197,10 +272,13 @@ export default function App() {
   const endMatch = async () => {
     setScreen(AppScreen.SUMMARY);
     setLoadingSummary(true);
-    const result = await generateMatchSummary(matchState);
-    setSummary(result);
-    setLoadingSummary(false);
-    localStorage.removeItem('cricketMatchState');
+    // Simulate slight delay for "calculation" effect
+    setTimeout(async () => {
+        const result = await generateMatchSummary(matchState);
+        setSummary(result);
+        setLoadingSummary(false);
+        localStorage.removeItem('cricketMatchState');
+    }, 500);
   };
 
   const handleVideoAvailable = (blob: Blob) => {
@@ -238,8 +316,6 @@ export default function App() {
         overs: `${matchState.currentOver}.${matchState.currentBall}`
     };
 
-    // Determine teams based on stored state
-    // If we are in 2nd innings, battingTeam is playing now.
     const team1Name = matchState.innings === 2 ? matchState.bowlingTeam : matchState.battingTeam;
     const team2Name = matchState.innings === 2 ? matchState.battingTeam : matchState.bowlingTeam;
 
@@ -294,33 +370,17 @@ export default function App() {
              </div>
         </div>
 
-        {matchVideoBlob && (
-           <button 
-             onClick={downloadVideo}
-             className="w-full mb-6 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/50 text-blue-300 py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors group"
-           >
-             <div className="p-2 bg-blue-600 rounded-full text-white group-hover:scale-110 transition-transform">
-                <Video size={20} />
-             </div>
-             Download Video ({(matchVideoBlob.size / 1024 / 1024).toFixed(1)} MB)
-           </button>
-        )}
-
         {loadingSummary ? (
           <div className="animate-pulse flex flex-col gap-4">
             <div className="h-32 bg-gray-800 rounded-xl w-full border border-gray-700"></div>
             <p className="text-center text-sm text-emerald-400 mt-4 flex justify-center items-center gap-2">
                 <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce"></div>
-                Analyzing match stats...
+                Calculating stats...
             </p>
           </div>
         ) : (
           <div className="space-y-4">
-            {typeof summary === 'string' ? (
-                 <div className="prose prose-invert bg-gray-800 p-6 rounded-xl">
-                    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">{summary}</pre>
-                 </div>
-            ) : (
+            {typeof summary !== 'string' && (
                 <>
                     {/* Analysis Card */}
                     <div className="bg-gray-800 p-6 rounded-xl border border-gray-700">
@@ -334,10 +394,10 @@ export default function App() {
                     </div>
 
                     {/* Highlights & Tips Grid */}
-                    <div className="grid grid-cols-1 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="bg-gray-800 p-5 rounded-xl border border-gray-700">
                             <h3 className="text-xs uppercase tracking-wider text-yellow-500 font-bold mb-3 flex items-center gap-2">
-                                <Star size={14} /> Key Moments
+                                <Star size={14} /> Highlights
                             </h3>
                             <ul className="space-y-2">
                                 {summary.highlights.map((h, i) => (
@@ -351,7 +411,7 @@ export default function App() {
                         
                         <div className="bg-gray-800 p-5 rounded-xl border border-gray-700">
                             <h3 className="text-xs uppercase tracking-wider text-blue-400 font-bold mb-3 flex items-center gap-2">
-                                <Lightbulb size={14} /> Tactical Advice
+                                <Lightbulb size={14} /> Insight
                             </h3>
                             <p className="text-sm text-gray-300 leading-relaxed">
                                 {summary.advice}
@@ -376,29 +436,35 @@ export default function App() {
     );
   }
 
+  // --- LIVE SCREEN ---
   return (
-    <div className="min-h-screen bg-gray-900 flex flex-col">
-      <div className="p-4 flex justify-between items-center bg-gray-800 border-b border-gray-700 z-10">
-        <h1 className="font-bold text-emerald-400">
+    <div className="h-screen bg-gray-900 flex flex-col overflow-hidden">
+      {/* Fixed Header */}
+      <div className="flex-none p-4 flex justify-between items-center bg-gray-800 border-b border-gray-700 z-10 shadow-md">
+        <h1 className="font-bold text-emerald-400 flex items-center gap-2">
+           <Activity size={18} />
            {matchState.isMatchOver ? 'Match Result' : 'Live Match'}
         </h1>
-        <div className="flex gap-3">
+        <div className="flex gap-2">
            <button onClick={() => setVoiceEnabled(!voiceEnabled)} className={`p-2 rounded-full ${voiceEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-700 text-gray-400'}`}>
-              <Mic size={20} />
+              <Mic size={18} />
            </button>
-           <button onClick={handleUndo} className="p-2 bg-gray-700 rounded-full text-white active:scale-95">
-             <Undo2 size={20} />
+           <button onClick={handleUndo} className="p-2 bg-gray-700 rounded-full text-white active:scale-95 hover:bg-gray-600">
+             <Undo2 size={18} />
            </button>
-           <button onClick={endMatch} className="px-3 py-1 bg-red-500/20 text-red-400 rounded-lg text-xs font-bold border border-red-500/50">
+           <button onClick={endMatch} className="px-3 py-1 bg-red-500/20 text-red-400 rounded-lg text-xs font-bold border border-red-500/50 hover:bg-red-500/30">
              END
            </button>
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto pb-32">
+      {/* Scrollable Content Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Scoreboard */}
         <ScoreBoard state={matchState} />
         
-        <div className="w-full">
+        {/* Camera Container - Increased Height */}
+        <div className="w-full h-[60vh] min-h-[300px] shrink-0 shadow-2xl">
             <CameraDetector 
                 isActive={!matchState.isMatchOver && !pendingInput} 
                 onMotionDetected={handleBallDetection} 
@@ -406,39 +472,43 @@ export default function App() {
             />
         </div>
 
+        {/* Input Trigger / Status */}
         {!pendingInput && !matchState.isMatchOver && (
-            <div className="text-center text-gray-500 text-sm italic mt-2 animate-pulse">
-                Tracking {matchState.innings === 1 ? '1st' : '2nd'} Innings...
-                <br/>
+            <div className="text-center pb-8">
                 <button 
                   onClick={() => setPendingInput(true)} 
-                  className="mt-2 text-emerald-500 underline not-italic font-semibold"
+                  className="bg-gray-800 border border-gray-600 px-6 py-3 rounded-full text-emerald-400 font-bold shadow-lg active:scale-95 transition-all"
                 >
-                    Manual Input
+                    + Add Score Manually
                 </button>
+                <p className="text-xs text-gray-500 mt-2">
+                    Camera is monitoring...
+                </p>
             </div>
         )}
         
         {matchState.isMatchOver && (
-             <div className="bg-emerald-900/50 border border-emerald-500 p-4 rounded-xl text-center">
-                 <h2 className="text-xl font-bold text-white mb-2">{matchState.matchResult}</h2>
-                 <button onClick={endMatch} className="bg-emerald-500 text-white px-6 py-2 rounded-full font-bold">
-                    Generate Summary
+             <div className="bg-emerald-900/50 border border-emerald-500 p-6 rounded-xl text-center mb-8">
+                 <h2 className="text-2xl font-bold text-white mb-4">{matchState.matchResult}</h2>
+                 <button onClick={endMatch} className="bg-emerald-500 hover:bg-emerald-400 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-emerald-500/30 transition-all">
+                    View Stats
                  </button>
              </div>
         )}
       </div>
 
+      {/* Slide-up Input Panel */}
       <div 
-        className={`fixed bottom-0 left-0 right-0 bg-gray-800 border-t-2 border-emerald-600 rounded-t-3xl shadow-2xl transition-transform duration-300 transform ${pendingInput ? 'translate-y-0' : 'translate-y-full'} z-50`}
+        className={`fixed inset-x-0 bottom-0 bg-gray-800 border-t-2 border-emerald-600 rounded-t-3xl shadow-2xl transition-transform duration-300 transform ${pendingInput ? 'translate-y-0' : 'translate-y-full'} z-50 max-h-[60vh] overflow-y-auto`}
       >
         <div className="p-6">
             <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                   {matchState.battingTeam} batting...
+                   <span className="w-2 h-6 bg-emerald-500 rounded-full"></span>
+                   {matchState.battingTeam} Batting
                 </h3>
-                <button onClick={() => setPendingInput(false)} className="text-gray-400 hover:text-white">
-                    <XCircle />
+                <button onClick={() => setPendingInput(false)} className="bg-gray-700 p-2 rounded-full text-gray-400 hover:text-white">
+                    <XCircle size={20} />
                 </button>
             </div>
 
@@ -447,24 +517,24 @@ export default function App() {
                     <button
                         key={run}
                         onClick={() => processScore(run, false)}
-                        className={`py-4 rounded-xl font-bold text-xl shadow-lg active:scale-95 transition-all
+                        className={`py-4 rounded-xl font-bold text-2xl shadow-lg active:scale-95 transition-all border-b-4 
                             ${run === 4 || run === 6 
-                                ? 'bg-purple-600 text-white hover:bg-purple-500' 
-                                : 'bg-gray-700 text-white hover:bg-gray-600'}`}
+                                ? 'bg-indigo-600 text-white border-indigo-800 hover:bg-indigo-500' 
+                                : 'bg-gray-700 text-white border-gray-900 hover:bg-gray-600'}`}
                     >
                         {run}
                     </button>
                 ))}
                 <button
                     onClick={() => processScore(0, true)}
-                    className="col-span-2 py-4 rounded-xl font-bold text-xl bg-red-600 text-white hover:bg-red-500 shadow-lg active:scale-95"
+                    className="col-span-2 py-4 rounded-xl font-bold text-xl bg-red-600 text-white border-b-4 border-red-800 hover:bg-red-500 shadow-lg active:scale-95 uppercase tracking-wider"
                 >
-                    WICKET
+                    OUT
                 </button>
             </div>
             <div className="text-center">
-                 <button onClick={() => setPendingInput(false)} className="text-xs text-gray-400 underline">
-                    False Alarm
+                 <button onClick={() => setPendingInput(false)} className="text-xs text-gray-400 underline hover:text-gray-300">
+                    Cancel Entry
                  </button>
             </div>
         </div>

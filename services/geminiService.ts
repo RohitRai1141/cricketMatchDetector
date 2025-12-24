@@ -1,7 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { MatchState } from "../types";
-
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export interface MatchSummaryData {
   headline: string;
@@ -10,56 +7,70 @@ export interface MatchSummaryData {
   advice: string;
 }
 
+// Deterministic Match Summary Generator (Offline)
 export const generateMatchSummary = async (matchState: MatchState): Promise<MatchSummaryData | string> => {
-  try {
-    const prompt = `
-      Act as a cricket data analyst. 
-      Provide a factual, statistics-driven summary of the match.
-      Do NOT use flowery language, quotes, or storytelling. Focus on the numbers.
-      
-      Match Result: ${matchState.matchResult || "Match ended prematurely"}
-      
-      1st Innings (${matchState.innings === 2 ? matchState.bowlingTeam : matchState.battingTeam}): 
-      ${matchState.firstInningsScore ? `${matchState.firstInningsScore.runs}/${matchState.firstInningsScore.wickets} in ${matchState.firstInningsScore.overs} overs` : `${matchState.totalRuns}/${matchState.wickets} (In Progress)`}
-      
-      2nd Innings (${matchState.innings === 2 ? matchState.battingTeam : "Did not bat"}):
-      ${matchState.innings === 2 ? `${matchState.totalRuns}/${matchState.wickets} in ${matchState.currentOver}.${matchState.currentBall} overs` : "N/A"}
-      
-      Target was: ${matchState.target || "N/A"}
-      
-      History (Last 12 balls of play): ${JSON.stringify(matchState.history.slice(-12))}
+  // 1. Determine Result Headline
+  const headline = matchState.matchResult || "Match In Progress";
 
-      Output Format: JSON
-      - headline: A short factual headline (e.g., "Team A wins by 10 runs").
-      - body: A 2-3 sentence technical analysis of why the winning team won (e.g., "Higher run rate in powerplay", "Economical bowling in death overs").
-      - highlights: List of 3 key statistical moments (e.g., "Over 2: 15 runs scored", "Wicket in Over 4 halted momentum").
-      - advice: One tactical improvement for the losing team based on stats.
-    `;
+  // 2. Statistics Calculation
+  const runRate = (matchState.totalRuns / Math.max(0.1, matchState.currentOver + matchState.currentBall/6)).toFixed(2);
+  const totalBalls = matchState.currentOver * 6 + matchState.currentBall;
+  const dotBalls = matchState.history.filter(b => b.runs === 0 && !b.isWicket).length;
+  const boundaries = matchState.history.filter(b => b.runs === 4 || b.runs === 6).length;
+  
+  // 3. Generate Highlights
+  const highlights: string[] = [];
+  
+  // Find big overs (>10 runs)
+  const runsPerOver: Record<number, number> = {};
+  matchState.history.forEach(b => {
+    runsPerOver[b.over] = (runsPerOver[b.over] || 0) + b.runs;
+  });
+  
+  Object.entries(runsPerOver).forEach(([over, runs]) => {
+    if (runs >= 10) highlights.push(`Big Over: ${runs} runs scored in Over ${Number(over) + 1}.`);
+  });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            headline: { type: Type.STRING },
-            body: { type: Type.STRING },
-            highlights: { type: Type.ARRAY, items: { type: Type.STRING } },
-            advice: { type: Type.STRING }
-          }
-        }
-      }
-    });
-
-    if (response.text) {
-        return JSON.parse(response.text) as MatchSummaryData;
-    }
-    throw new Error("No response text");
-
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    return "Unable to generate AI summary at this time.";
+  // Wickets
+  if (matchState.wickets > 0) {
+      highlights.push(`Bowling team took ${matchState.wickets} wickets.`);
+  } else {
+      highlights.push(`Batting team lost 0 wickets.`);
   }
+
+  highlights.push(`${boundaries} Boundaries hit.`);
+
+  // 4. Generate Body Analysis
+  let body = "";
+  if (matchState.innings === 2 && matchState.target) {
+      const required = matchState.target - matchState.totalRuns;
+      if (matchState.isMatchOver) {
+           body = `${matchState.matchResult}. The batting team ended with a run rate of ${runRate}.`;
+      } else {
+           body = `Chasing ${matchState.target}, the team needs ${required} more runs. Current Run Rate is ${runRate}.`;
+      }
+  } else {
+      body = `First Innings complete. Team scored ${matchState.totalRuns} for ${matchState.wickets}. Run Rate: ${runRate}.`;
+  }
+
+  // 5. Tactical Advice
+  let advice = "";
+  const dotBallPercentage = (dotBalls / Math.max(1, totalBalls)) * 100;
+  
+  if (parseFloat(runRate) < 6) {
+      advice = "Run rate is low. Try to rotate strike more often to keep the scoreboard ticking.";
+  } else if (matchState.wickets > (matchState.playersPerTeam / 2)) {
+      advice = "Lost too many wickets early. Middle order needs to consolidate.";
+  } else if (dotBallPercentage > 50) {
+      advice = `Dot ball percentage is high (${dotBallPercentage.toFixed(0)}%). Focus on finding gaps.`;
+  } else {
+      advice = "Great momentum. Keep playing aggressively.";
+  }
+
+  return {
+    headline,
+    body,
+    highlights: highlights.slice(0, 5), // Top 5 highlights
+    advice
+  };
 };

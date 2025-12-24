@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Camera, Eye, EyeOff, Video, Download, Hourglass } from 'lucide-react';
-import { DEFAULT_MOTION_CONFIG } from '../constants';
+import { Camera, Eye, EyeOff, Activity, Target, Settings2, Crosshair, RefreshCcw } from 'lucide-react';
+
+// Declare OpenCV on window
+declare global {
+  interface Window {
+    cv: any;
+  }
+}
 
 interface CameraDetectorProps {
   onMotionDetected: () => void;
@@ -8,231 +14,553 @@ interface CameraDetectorProps {
   onVideoAvailable?: (blob: Blob) => void;
 }
 
-const CameraDetector: React.FC<CameraDetectorProps> = ({ onMotionDetected, isActive, onVideoAvailable }) => {
+const CameraDetector: React.FC<CameraDetectorProps> = ({ 
+  onMotionDetected, 
+  isActive, 
+  onVideoAvailable 
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const previousFrameRef = useRef<ImageData | null>(null);
-  const lastTriggerTime = useRef<number>(0);
-  // Fix: Initialize with 0 to satisfy expected arguments
-  const animationRef = useRef<number>(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const frameCountRef = useRef<number>(0);
-  
-  const [stream, setStream] = useState<MediaStream | null>(null);
+  const animationRef = useRef(0);
+
+  // OpenCV State
+  const [cvReady, setCvReady] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
-  const [motionScore, setMotionScore] = useState(0);
-  const [sensitivity, setSensitivity] = useState(DEFAULT_MOTION_CONFIG.sensitivity);
-  const [isRecording, setIsRecording] = useState(false);
+  const [showMask, setShowMask] = useState(false);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [trackingStats, setTrackingStats] = useState({
+    area: 0,
+    circularity: 0,
+    velocity: 0,
+    detectedColor: 'None'
+  });
   const [isWarmingUp, setIsWarmingUp] = useState(true);
 
-  // Setup Camera & Recorder
+  // Tracking Logic State
+  const centroidHistory = useRef<{x: number, y: number, t: number}[]>([]);
+  const lastDetectionTime = useRef(0);
+  const consecutiveDetections = useRef(0);
+
+  // Multi-Color Ball Detection Ranges
+  const colorRanges = useRef({
+    tennisBall: {
+      name: "Tennis Ball",
+      low: [20, 80, 80, 0],
+      high: [40, 255, 255, 0],
+      low2: [0, 0, 0, 0],
+      high2: [0, 0, 0, 0]
+    },
+    cricketRed: {
+      name: "Cricket Red",
+      low: [0, 120, 100, 0],
+      high: [10, 255, 255, 0],
+      low2: [170, 120, 100, 0],
+      high2: [180, 255, 255, 0]
+    },
+    cricketWhite: {
+      name: "Cricket White",
+      low: [0, 0, 180, 0],
+      high: [180, 30, 255, 0],
+      low2: [0, 0, 0, 0],
+      high2: [0, 0, 0, 0]
+    }
+  });
+
+  // Memory Management for OpenCV Mats
+  const matsRef = useRef<any>({
+    src: null,
+    hsv: null,
+    masks: {}, // Will hold masks for each color
+    hierarchy: null,
+    contours: null,
+    kernel: null
+  });
+
+  // Check for OpenCV load
+  useEffect(() => {
+    const checkCv = setInterval(() => {
+      if (window.cv && window.cv.Mat) {
+        console.log("OpenCV.js Loaded");
+        setCvReady(true);
+        clearInterval(checkCv);
+      }
+    }, 100);
+    return () => clearInterval(checkCv);
+  }, []);
+
+  // Initialize Camera
   useEffect(() => {
     const startCamera = async () => {
       try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            facingMode: 'environment', 
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
             width: { ideal: 1280 },
             height: { ideal: 720 }
           },
-          audio: true, 
+          audio: false,
         });
-        setStream(mediaStream);
+
         if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
+          videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current?.play();
+            if (window.cv) {
+              initializeMats(videoRef.current!.videoWidth, videoRef.current!.videoHeight);
+            }
+          };
         }
 
-        // Initialize Recorder
-        if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-             const recorder = new MediaRecorder(mediaStream, { mimeType: 'video/webm;codecs=vp9' });
-             mediaRecorderRef.current = recorder;
-             
-             recorder.ondataavailable = (e) => {
-               if (e.data.size > 0) chunksRef.current.push(e.data);
-             };
-
-             recorder.onstop = () => {
-               const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-               if (onVideoAvailable) onVideoAvailable(blob);
-               chunksRef.current = []; // Reset
-             };
-
-             recorder.start(1000); // 1s chunks
-             setIsRecording(true);
-        }
-
-        // Warmup timer
         setTimeout(() => setIsWarmingUp(false), 2000);
-
       } catch (err) {
-        console.error("Camera access denied:", err);
+        console.error("Camera error:", err);
       }
     };
 
     startCamera();
 
     return () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
+      cleanupMats();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); 
+  }, []);
 
-  // Motion Detection Loop
-  const detectMotion = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !isActive) return;
+  const cleanupMats = () => {
+    const m = matsRef.current;
+    if (m.src) m.src.delete();
+    if (m.hsv) m.hsv.delete();
+    if (m.hierarchy) m.hierarchy.delete();
+    if (m.contours) m.contours.delete();
+    if (m.kernel) m.kernel.delete();
+    
+    // Clean up all color masks
+    Object.keys(m.masks).forEach(key => {
+      if (m.masks[key].mask1) m.masks[key].mask1.delete();
+      if (m.masks[key].mask2) m.masks[key].mask2.delete();
+      if (m.masks[key].maskFinal) m.masks[key].maskFinal.delete();
+      if (m.masks[key].low1) m.masks[key].low1.delete();
+      if (m.masks[key].high1) m.masks[key].high1.delete();
+      if (m.masks[key].low2) m.masks[key].low2.delete();
+      if (m.masks[key].high2) m.masks[key].high2.delete();
+    });
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+  };
 
-    if (!ctx || video.readyState !== 4) {
-      animationRef.current = requestAnimationFrame(detectMotion);
+  const initializeMats = (width: number, height: number) => {
+    const cv = window.cv;
+    if (!cv) return;
+
+    const m = matsRef.current;
+
+    // Initialize base mats
+    m.src = new cv.Mat(height, width, cv.CV_8UC4);
+    m.hsv = new cv.Mat(height, width, cv.CV_8UC3);
+    m.hierarchy = new cv.Mat();
+    m.contours = new cv.MatVector();
+    m.kernel = cv.Mat.ones(5, 5, cv.CV_8U);
+
+    // Initialize masks for each color range
+    const ranges = colorRanges.current;
+    Object.keys(ranges).forEach((colorKey) => {
+      const range = ranges[colorKey as keyof typeof ranges];
+      m.masks[colorKey] = {
+        mask1: new cv.Mat(height, width, cv.CV_8UC1),
+        mask2: new cv.Mat(height, width, cv.CV_8UC1),
+        maskFinal: new cv.Mat(height, width, cv.CV_8UC1),
+        low1: new cv.Mat(height, width, cv.CV_8UC3, range.low),
+        high1: new cv.Mat(height, width, cv.CV_8UC3, range.high),
+        low2: new cv.Mat(height, width, cv.CV_8UC3, range.low2),
+        high2: new cv.Mat(height, width, cv.CV_8UC3, range.high2)
+      };
+    });
+  };
+
+  const calibrateColor = () => {
+    if (!videoRef.current || !matsRef.current.hsv) return;
+
+    const cv = window.cv;
+    const m = matsRef.current;
+
+    // Sample center of image (80x80 box for better sampling)
+    const centerX = Math.floor(m.hsv.cols / 2);
+    const centerY = Math.floor(m.hsv.rows / 2);
+    const rect = new cv.Rect(centerX - 40, centerY - 40, 80, 80);
+    const roi = m.hsv.roi(rect);
+
+    // Calculate mean HSV
+    const mean = cv.mean(roi);
+    roi.delete();
+
+    const h = mean[0];
+    const s = mean[1];
+    const v = mean[2];
+
+    // More generous tolerance for outdoor conditions
+    const hTol = 25;
+    const sTol = 100;
+    const vTol = 100;
+
+    // Determine which color preset this is closest to and update it
+    let targetColor = 'tennisBall';
+    
+    // Yellow-green range (tennis ball)
+    if (h >= 20 && h <= 40) {
+      targetColor = 'tennisBall';
+    }
+    // Red range (cricket ball red)
+    else if (h < 15 || h > 165) {
+      targetColor = 'cricketRed';
+    }
+    // Low saturation (white cricket ball)
+    else if (s < 50 && v > 150) {
+      targetColor = 'cricketWhite';
+    }
+
+    // Update the specific color range with calibrated values
+    const newRange = {
+      low: [Math.max(0, h - hTol), Math.max(50, s - sTol), Math.max(50, v - vTol), 0],
+      high: [Math.min(180, h + hTol), 255, 255, 0],
+      low2: [0, 0, 0, 0],
+      high2: [0, 0, 0, 0]
+    };
+
+    // Handle red wraparound
+    if (h < hTol || h > 180 - hTol) {
+      newRange.low = [0, Math.max(50, s - sTol), Math.max(50, v - vTol), 0];
+      newRange.high = [Math.min(180, h + hTol), 255, 255, 0];
+      newRange.low2 = [Math.max(0, 180 - hTol), Math.max(50, s - sTol), Math.max(50, v - vTol), 0];
+      newRange.high2 = [180, 255, 255, 0];
+    }
+    
+    // Update ref
+    const ranges: any = colorRanges.current;
+    if (ranges[targetColor]) {
+       ranges[targetColor].low = newRange.low;
+       ranges[targetColor].high = newRange.high;
+       ranges[targetColor].low2 = newRange.low2;
+       ranges[targetColor].high2 = newRange.high2;
+    }
+
+    // Update the threshold mats for the calibrated color
+    const colorMask = matsRef.current.masks[targetColor];
+    if (colorMask) {
+      colorMask.low1.delete();
+      colorMask.high1.delete();
+      colorMask.low2.delete();
+      colorMask.high2.delete();
+
+      colorMask.low1 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.low);
+      colorMask.high1 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.high);
+      colorMask.low2 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.low2);
+      colorMask.high2 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.high2);
+    }
+
+    setIsCalibrating(false);
+    setDebugMode(true);
+    setShowMask(true);
+  };
+
+  const processFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !isActive || !cvReady || isWarmingUp) {
+      animationRef.current = requestAnimationFrame(processFrame);
       return;
     }
 
-    // Draw current frame to canvas (scaled down for performance)
-    const width = 100; // Low res for analysis
-    const height = 100;
-    canvas.width = width;
-    canvas.height = height;
-    ctx.drawImage(video, 0, 0, width, height);
+    const cv = window.cv;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const m = matsRef.current;
 
-    const currentFrame = ctx.getImageData(0, 0, width, height);
-    
-    // Skip detection during warmup
-    if (isWarmingUp) {
-        previousFrameRef.current = currentFrame;
-        animationRef.current = requestAnimationFrame(detectMotion);
-        return;
+    if (video.readyState !== 4 || !m.src) {
+      animationRef.current = requestAnimationFrame(processFrame);
+      return;
     }
-    
-    if (previousFrameRef.current) {
-      let diffScore = 0;
-      const data = currentFrame.data;
-      const prevData = previousFrameRef.current.data;
-      const length = data.length;
 
-      for (let i = 0; i < length; i += 16) { 
-        const rDiff = Math.abs(data[i] - prevData[i]);
-        const gDiff = Math.abs(data[i + 1] - prevData[i + 1]);
-        const bDiff = Math.abs(data[i + 2] - prevData[i + 2]);
-        
-        if (rDiff + gDiff + bDiff > 150) { 
-          diffScore++;
-        }
-      }
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-      setMotionScore(diffScore);
+    if (!ctx) return;
 
-      const now = Date.now();
-      const timeSinceLast = now - lastTriggerTime.current;
+    // Draw raw video frame
+    ctx.drawImage(video, 0, 0);
+
+    // Calibration Overlay
+    if (isCalibrating) {
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 4;
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      ctx.strokeRect(cx - 60, cy - 60, 120, 120);
       
-      if (diffScore > sensitivity && timeSinceLast > DEFAULT_MOTION_CONFIG.cooldownMs) {
-        lastTriggerTime.current = now;
-        console.log("Ball Detected via Motion! Score:", diffScore);
-        onMotionDetected();
-      }
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, 0, canvas.width, cy - 70);
+      ctx.fillRect(0, cy + 70, canvas.width, canvas.height - (cy+70));
+      
+      ctx.font = "24px Arial";
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.fillText("PLACE BALL IN YELLOW BOX", cx, cy - 80);
+      ctx.fillText("TAP SCREEN TO CALIBRATE", cx, cy + 100);
+      
+      animationRef.current = requestAnimationFrame(processFrame);
+      return;
     }
 
-    previousFrameRef.current = currentFrame;
-    animationRef.current = requestAnimationFrame(detectMotion);
-  }, [isActive, onMotionDetected, sensitivity, isWarmingUp]);
+    try {
+      // Read Frame into OpenCV
+      m.src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+
+      // Convert to HSV
+      cv.cvtColor(m.src, m.hsv, cv.COLOR_RGBA2RGB);
+      cv.cvtColor(m.hsv, m.hsv, cv.COLOR_RGB2HSV);
+
+      // Apply Gaussian blur to reduce noise
+      cv.GaussianBlur(m.hsv, m.hsv, new cv.Size(5, 5), 0);
+
+      const allDetectedCircles: any[] = [];
+      const ranges = colorRanges.current;
+      
+      // CORE LOGIC: Process each color range independently
+      Object.keys(ranges).forEach((colorKey) => {
+        const colorMask = m.masks[colorKey];
+        const colorName = ranges[colorKey as keyof typeof ranges].name;
+
+        // Apply color thresholding for this specific color
+        cv.inRange(m.hsv, colorMask.low1, colorMask.high1, colorMask.mask1);
+        cv.inRange(m.hsv, colorMask.low2, colorMask.high2, colorMask.mask2);
+        cv.addWeighted(colorMask.mask1, 1.0, colorMask.mask2, 1.0, 0.0, colorMask.maskFinal);
+
+        // Morphological operations to clean up mask
+        cv.morphologyEx(colorMask.maskFinal, colorMask.maskFinal, cv.MORPH_OPEN, m.kernel);
+        cv.morphologyEx(colorMask.maskFinal, colorMask.maskFinal, cv.MORPH_CLOSE, m.kernel);
+
+        // Find contours for this color
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+        cv.findContours(colorMask.maskFinal, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        // Adaptive area thresholds
+        const minArea = Math.max(300, (canvas.width * canvas.height) * 0.0002);
+        const maxArea = (canvas.width * canvas.height) * 0.15;
+
+        // Analyze each contour
+        for (let i = 0; i < contours.size(); ++i) {
+          let contour = contours.get(i);
+          let area = cv.contourArea(contour);
+
+          if (area < minArea || area > maxArea) continue;
+
+          let perimeter = cv.arcLength(contour, true);
+          if (perimeter > 0) {
+            let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+
+            // Check circularity (lenient for motion blur)
+            if (circularity > 0.25) {
+              let circle = cv.minEnclosingCircle(contour);
+              let rect = cv.boundingRect(contour);
+              let aspectRatio = Math.max(rect.width, rect.height) / Math.min(rect.width, rect.height);
+
+              // Balls should be roughly circular
+              if (aspectRatio < 2.0) {
+                allDetectedCircles.push({
+                  center: circle.center,
+                  radius: circle.radius,
+                  area: area,
+                  circularity: circularity,
+                  aspectRatio: aspectRatio,
+                  color: colorName,
+                  colorKey: colorKey,
+                  score: area * circularity * (2.0 - aspectRatio)
+                });
+              }
+            }
+          }
+        }
+
+        contours.delete();
+        hierarchy.delete();
+      });
+
+      // Select best ball across ALL colors
+      let bestBall = null;
+      if (allDetectedCircles.length > 0) {
+        allDetectedCircles.sort((a, b) => b.score - a.score);
+        bestBall = allDetectedCircles[0];
+      }
+
+      // Visualization
+      if (showMask && bestBall) {
+        // Show the mask of the detected color
+        const detectedMask = m.masks[bestBall.colorKey].maskFinal;
+        cv.imshow(canvas, detectedMask);
+      }
+
+      if (bestBall) {
+        // Draw detection circle
+        ctx.beginPath();
+        ctx.arc(bestBall.center.x, bestBall.center.y, bestBall.radius, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        // Draw crosshair
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bestBall.center.x - 20, bestBall.center.y);
+        ctx.lineTo(bestBall.center.x + 20, bestBall.center.y);
+        ctx.moveTo(bestBall.center.x, bestBall.center.y - 20);
+        ctx.lineTo(bestBall.center.x, bestBall.center.y + 20);
+        ctx.stroke();
+
+        // Calculate velocity
+        const now = Date.now();
+        const lastPos = centroidHistory.current[centroidHistory.current.length - 1];
+        let velocity = 0;
+
+        if (lastPos) {
+          const dx = bestBall.center.x - lastPos.x;
+          const dy = bestBall.center.y - lastPos.y;
+          const dt = (now - lastPos.t) / 1000;
+          const distance = Math.sqrt(dx*dx + dy*dy);
+          if (dt > 0) velocity = distance / dt;
+        }
+
+        setTrackingStats({
+          area: Math.round(bestBall.area),
+          circularity: Number(bestBall.circularity.toFixed(2)),
+          velocity: Math.round(velocity),
+          detectedColor: bestBall.color
+        });
+
+        centroidHistory.current.push({ x: bestBall.center.x, y: bestBall.center.y, t: now });
+        if (centroidHistory.current.length > 20) centroidHistory.current.shift();
+
+        // Motion detection filter
+        if (velocity > 20) {
+          consecutiveDetections.current += 1;
+        } else {
+          consecutiveDetections.current = Math.max(0, consecutiveDetections.current - 1);
+        }
+
+        if (consecutiveDetections.current > 2 && (now - lastDetectionTime.current > 1500)) {
+          lastDetectionTime.current = now;
+          onMotionDetected();
+
+          // Visual flash
+          ctx.fillStyle = 'rgba(0, 255, 0, 0.3)';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+      } else {
+        consecutiveDetections.current = 0;
+        setTrackingStats(prev => ({ ...prev, velocity: 0, detectedColor: 'None' }));
+      }
+
+    } catch (e) {
+      console.error("CV Error", e);
+    }
+
+    animationRef.current = requestAnimationFrame(processFrame);
+  }, [cvReady, isActive, isWarmingUp, onMotionDetected, showMask, isCalibrating]);
 
   useEffect(() => {
-    if (isActive) {
-      animationRef.current = requestAnimationFrame(detectMotion);
+    if (cvReady && isActive) {
+      animationRef.current = requestAnimationFrame(processFrame);
     }
     return () => {
-        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [isActive, detectMotion]);
+  }, [cvReady, isActive, processFrame]);
 
   return (
-    <div className="relative w-full h-64 bg-black rounded-lg overflow-hidden shadow-lg border border-gray-700 group">
-      <video
-        ref={videoRef}
-        autoPlay
+    <div className="relative w-full h-full bg-black overflow-hidden rounded-xl border-2 border-gray-700">
+      <video 
+        ref={videoRef} 
+        className="hidden"
         playsInline
         muted
-        className="w-full h-full object-cover"
       />
-      <canvas ref={canvasRef} className="hidden" />
 
-      {/* Overlay UI */}
-      <div className="absolute top-2 left-2 flex gap-2">
-         <div className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${isActive ? 'bg-green-900/80 text-green-400' : 'bg-yellow-900/80 text-yellow-400'}`}>
-            {isWarmingUp ? (
-                <>
-                    <Hourglass size={14} className="animate-spin" />
-                    Initializing...
-                </>
-            ) : (
-                <>
-                    <Camera size={14} className={isActive ? 'animate-pulse' : ''} />
-                    {isActive ? 'Tracking' : 'Paused'}
-                </>
-            )}
-         </div>
-         {isRecording && (
-            <div className="px-2 py-1 rounded text-xs flex items-center gap-1 bg-red-900/80 text-red-400 animate-pulse">
-                <div className="w-2 h-2 rounded-full bg-red-500"></div>
-                REC
-            </div>
-         )}
+      {/* Main Canvas Area */}
+      <canvas 
+        ref={canvasRef} 
+        className="absolute inset-0 w-full h-full object-cover cursor-pointer"
+        onClick={() => isCalibrating && calibrateColor()}
+      />
+
+      {/* CV Loading Overlay */}
+      {!cvReady && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-80 z-20">
+          <div className="text-white text-xl font-bold animate-pulse">
+            Loading CV Engine...
+          </div>
+        </div>
+      )}
+
+      {/* Control Bar */}
+      <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-10">
+        <div className="flex flex-col gap-2">
+          <div className={`px-3 py-1 rounded-full text-xs font-bold w-fit ${isActive ? 'bg-red-600 animate-pulse' : 'bg-gray-600'}`}>
+            {isActive ? "🔴 LIVE" : "⏸ PAUSED"}
+          </div>
+          
+          <div className="px-3 py-1 rounded-lg text-xs font-bold bg-blue-600 text-white w-fit shadow-lg backdrop-blur-md bg-opacity-80">
+            {trackingStats.detectedColor}
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <button 
+            onClick={() => setIsCalibrating(true)}
+            className={`p-2 rounded-lg text-xs font-bold flex items-center gap-1 shadow-lg backdrop-blur-md ${
+              isCalibrating ? 'bg-yellow-500 text-black' : 'bg-gray-800/80 text-white hover:bg-gray-700'
+            }`}
+          >
+            <Target size={16} />
+            {isCalibrating ? "TAP BALL" : "CALIBRATE"}
+          </button>
+
+          <button 
+            onClick={() => setDebugMode(!debugMode)}
+            className={`p-2 rounded-lg shadow-lg backdrop-blur-md ${debugMode ? 'bg-blue-600' : 'bg-gray-800/80'} text-white`}
+          >
+            {debugMode ? <Eye size={16} /> : <EyeOff size={16} />}
+          </button>
+        </div>
       </div>
 
-      <div className="absolute top-2 right-2 flex gap-2">
-         <button 
-           onClick={() => setDebugMode(!debugMode)}
-           className="p-1.5 bg-black/40 rounded-full text-white/70 hover:text-white backdrop-blur-sm"
-         >
-           {debugMode ? <Eye size={16} /> : <EyeOff size={16} />}
-         </button>
-      </div>
+      {/* Debug Info Panel */}
+      {debugMode && (
+        <div className="absolute bottom-4 left-4 right-4 bg-black/80 backdrop-blur-md rounded-lg p-3 text-white text-xs space-y-2 z-10 border border-gray-700">
+          <div className="flex justify-between items-center">
+            <span className="flex items-center gap-2">
+              <Activity size={14} className="text-cyan-400" />
+              Velocity: {trackingStats.velocity} px/s
+            </span>
+            <span className="flex items-center gap-2">
+              <Target size={14} className="text-green-400" />
+              Area: {trackingStats.area} px²
+            </span>
+          </div>
+          
+          <div className="flex justify-between items-center">
+            <span className="flex items-center gap-2">
+              <Crosshair size={14} className="text-purple-400" />
+              Circularity: {trackingStats.circularity}
+            </span>
+            <button 
+              onClick={() => setShowMask(!showMask)}
+              className="text-purple-400 hover:text-purple-300 flex items-center gap-1"
+            >
+              <Settings2 size={14} />
+              {showMask ? "Hide Mask" : "Show Mask"}
+            </button>
+          </div>
 
-      {(debugMode) && (
-        <div className="absolute bottom-2 left-2 right-2 bg-black/80 backdrop-blur-md p-3 text-xs font-mono text-green-300 rounded-lg border border-gray-700">
-            <div className="flex justify-between items-center mb-1">
-                <span>Motion: {motionScore}</span>
-                <span className="text-gray-400">Trigger > {sensitivity}</span>
-            </div>
-            
-            <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden mb-3 relative">
-                 <div 
-                    className="absolute top-0 bottom-0 w-0.5 bg-white z-10" 
-                    style={{ left: `${Math.min((sensitivity / 625) * 100, 100)}%` }} 
-                 ></div>
-                 
-                <div 
-                    className={`h-full transition-all duration-100 ${motionScore > sensitivity ? 'bg-red-500' : 'bg-emerald-500'}`} 
-                    style={{ width: `${Math.min((motionScore / 625) * 100, 100)}%` }}
-                />
-            </div>
-
-            <div className="flex items-center gap-2">
-                <span className="text-gray-400">Sens:</span>
-                <input 
-                    type="range" 
-                    min="50" 
-                    max="1000" 
-                    step="50"
-                    value={sensitivity} 
-                    onChange={(e) => setSensitivity(Number(e.target.value))}
-                    className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
-                />
-            </div>
-            <div className="text-[10px] text-gray-500 mt-1 text-center">
-                Slide right to reduce false detections (lower sensitivity)
-            </div>
+          <div className="text-center text-gray-400 pt-2 border-t border-gray-700">
+            Multi-Color Detection: Tennis Ball • Cricket Red • Cricket White
+          </div>
         </div>
       )}
     </div>

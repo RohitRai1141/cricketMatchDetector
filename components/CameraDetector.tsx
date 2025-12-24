@@ -58,13 +58,6 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
       high: [10, 255, 255, 0],
       low2: [170, 120, 100, 0],
       high2: [180, 255, 255, 0]
-    },
-    cricketWhite: {
-      name: "Cricket White",
-      low: [0, 0, 180, 0],
-      high: [180, 30, 255, 0],
-      low2: [0, 0, 0, 0],
-      high2: [0, 0, 0, 0]
     }
   });
 
@@ -244,10 +237,6 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     // Red range (cricket ball red)
     else if (h < 15 || h > 165) {
       targetColor = 'cricketRed';
-    }
-    // Low saturation (white cricket ball)
-    else if (s < 50 && v > 150) {
-      targetColor = 'cricketWhite';
     }
 
     // Update the specific color range with calibrated values
@@ -593,7 +582,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
           </div>
 
           <div className="text-center text-gray-400 pt-2 border-t border-gray-700">
-            Multi-Color Detection: Tennis Ball • Cricket Red • Cricket White
+            Multi-Color Detection: Tennis Ball • Cricket Red
           </div>
         </div>
       )}

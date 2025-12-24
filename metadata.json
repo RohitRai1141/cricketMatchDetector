@@ -1,0 +1,8 @@
+{
+  "name": "Cricket Match Tracker",
+  "description": "Real-time cricket scoring app with camera-based motion detection for automated ball tracking.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Camera, Eye, EyeOff, Activity, Target, Settings2, Crosshair, RefreshCcw } from 'lucide-react';
+import { Camera, Eye, EyeOff, Activity, Target, Settings2, Crosshair, RefreshCcw, CameraOff } from 'lucide-react';
 
 // Declare OpenCV on window
 declare global {
@@ -12,12 +12,14 @@ interface CameraDetectorProps {
   onMotionDetected: () => void;
   isActive: boolean;
   onVideoAvailable?: (blob: Blob) => void;
+  isCameraOn: boolean;
 }
 
 const CameraDetector: React.FC<CameraDetectorProps> = ({ 
   onMotionDetected, 
   isActive, 
-  onVideoAvailable 
+  onVideoAvailable,
+  isCameraOn
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -47,16 +49,16 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
   const colorRanges = useRef({
     tennisBall: {
       name: "Tennis Ball",
-      low: [20, 80, 80, 0],
-      high: [40, 255, 255, 0],
+      low: [25, 100, 100, 0],
+      high: [45, 255, 255, 0],
       low2: [0, 0, 0, 0],
       high2: [0, 0, 0, 0]
     },
     cricketRed: {
       name: "Cricket Red",
-      low: [0, 120, 100, 0],
+      low: [0, 100, 100, 0],
       high: [10, 255, 255, 0],
-      low2: [170, 120, 100, 0],
+      low2: [170, 100, 100, 0],
       high2: [180, 255, 255, 0]
     }
   });
@@ -85,6 +87,12 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
 
   // Initialize Camera & Recorder
   useEffect(() => {
+    if (!isCameraOn) {
+        setIsWarmingUp(false);
+        return;
+    }
+
+    setIsWarmingUp(true);
     let stream: MediaStream | null = null;
 
     const startCamera = async () => {
@@ -95,7 +103,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
             width: { ideal: 1280 }, 
             height: { ideal: 720 }
           },
-          audio: false, // Audio often causes permission issues or feedback, kept off for now
+          audio: false, 
         });
 
         if (videoRef.current) {
@@ -131,6 +139,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
         setTimeout(() => setIsWarmingUp(false), 2000);
       } catch (err) {
         console.error("Camera error:", err);
+        setIsWarmingUp(false);
       }
     };
 
@@ -149,25 +158,25 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
 
       cleanupMats();
     };
-  }, []); // Run once on mount
+  }, [isCameraOn]); // Dependency updated
 
   const cleanupMats = () => {
     const m = matsRef.current;
-    if (m.src) m.src.delete();
-    if (m.hsv) m.hsv.delete();
-    if (m.hierarchy) m.hierarchy.delete();
-    if (m.contours) m.contours.delete();
-    if (m.kernel) m.kernel.delete();
+    if (m.src && !m.src.isDeleted()) m.src.delete();
+    if (m.hsv && !m.hsv.isDeleted()) m.hsv.delete();
+    if (m.hierarchy && !m.hierarchy.isDeleted()) m.hierarchy.delete();
+    if (m.contours && !m.contours.isDeleted()) m.contours.delete();
+    if (m.kernel && !m.kernel.isDeleted()) m.kernel.delete();
     
     // Clean up all color masks
     Object.keys(m.masks).forEach(key => {
-      if (m.masks[key].mask1) m.masks[key].mask1.delete();
-      if (m.masks[key].mask2) m.masks[key].mask2.delete();
-      if (m.masks[key].maskFinal) m.masks[key].maskFinal.delete();
-      if (m.masks[key].low1) m.masks[key].low1.delete();
-      if (m.masks[key].high1) m.masks[key].high1.delete();
-      if (m.masks[key].low2) m.masks[key].low2.delete();
-      if (m.masks[key].high2) m.masks[key].high2.delete();
+      if (m.masks[key].mask1 && !m.masks[key].mask1.isDeleted()) m.masks[key].mask1.delete();
+      if (m.masks[key].mask2 && !m.masks[key].mask2.isDeleted()) m.masks[key].mask2.delete();
+      if (m.masks[key].maskFinal && !m.masks[key].maskFinal.isDeleted()) m.masks[key].maskFinal.delete();
+      if (m.masks[key].low1 && !m.masks[key].low1.isDeleted()) m.masks[key].low1.delete();
+      if (m.masks[key].high1 && !m.masks[key].high1.isDeleted()) m.masks[key].high1.delete();
+      if (m.masks[key].low2 && !m.masks[key].low2.isDeleted()) m.masks[key].low2.delete();
+      if (m.masks[key].high2 && !m.masks[key].high2.isDeleted()) m.masks[key].high2.delete();
     });
 
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
@@ -176,6 +185,9 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
   const initializeMats = (width: number, height: number) => {
     const cv = window.cv;
     if (!cv) return;
+
+    // cleanup old mats first just in case
+    cleanupMats();
 
     const m = matsRef.current;
 
@@ -231,7 +243,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     let targetColor = 'tennisBall';
     
     // Yellow-green range (tennis ball)
-    if (h >= 20 && h <= 40) {
+    if (h >= 20 && h <= 45) { // Updated to match new range roughly
       targetColor = 'tennisBall';
     }
     // Red range (cricket ball red)
@@ -267,10 +279,10 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     // Update the threshold mats for the calibrated color
     const colorMask = matsRef.current.masks[targetColor];
     if (colorMask) {
-      colorMask.low1.delete();
-      colorMask.high1.delete();
-      colorMask.low2.delete();
-      colorMask.high2.delete();
+      if(colorMask.low1 && !colorMask.low1.isDeleted()) colorMask.low1.delete();
+      if(colorMask.high1 && !colorMask.high1.isDeleted()) colorMask.high1.delete();
+      if(colorMask.low2 && !colorMask.low2.isDeleted()) colorMask.low2.delete();
+      if(colorMask.high2 && !colorMask.high2.isDeleted()) colorMask.high2.delete();
 
       colorMask.low1 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.low);
       colorMask.high1 = new cv.Mat(m.src.rows, m.src.cols, cv.CV_8UC3, newRange.high);
@@ -284,7 +296,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
   };
 
   const processFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !isActive || !cvReady || isWarmingUp) {
+    if (!videoRef.current || !canvasRef.current || !isActive || !cvReady || isWarmingUp || !isCameraOn) {
       animationRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -295,7 +307,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const m = matsRef.current;
 
-    if (video.readyState !== 4 || !m.src) {
+    if (video.readyState !== 4 || !m.src || m.src.isDeleted()) {
       animationRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -348,6 +360,9 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
       Object.keys(ranges).forEach((colorKey) => {
         const colorMask = m.masks[colorKey];
         const colorName = ranges[colorKey as keyof typeof ranges].name;
+        
+        // Ensure mats are valid
+        if(!colorMask.mask1 || colorMask.mask1.isDeleted()) return;
 
         // Apply color thresholding for this specific color
         cv.inRange(m.hsv, colorMask.low1, colorMask.high1, colorMask.mask1);
@@ -485,16 +500,16 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
     }
 
     animationRef.current = requestAnimationFrame(processFrame);
-  }, [cvReady, isActive, isWarmingUp, onMotionDetected, showMask, isCalibrating]);
+  }, [cvReady, isActive, isWarmingUp, onMotionDetected, showMask, isCalibrating, isCameraOn]);
 
   useEffect(() => {
-    if (cvReady && isActive) {
+    if (cvReady && isActive && isCameraOn) {
       animationRef.current = requestAnimationFrame(processFrame);
     }
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [cvReady, isActive, processFrame]);
+  }, [cvReady, isActive, isCameraOn, processFrame]);
 
   return (
     <div className="relative w-full h-full bg-black overflow-hidden rounded-xl border-2 border-gray-700">
@@ -506,14 +521,21 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
       />
 
       {/* Main Canvas Area */}
-      <canvas 
-        ref={canvasRef} 
-        className="absolute inset-0 w-full h-full object-cover cursor-pointer"
-        onClick={() => isCalibrating && calibrateColor()}
-      />
+      {isCameraOn ? (
+        <canvas 
+          ref={canvasRef} 
+          className="absolute inset-0 w-full h-full object-cover cursor-pointer"
+          onClick={() => isCalibrating && calibrateColor()}
+        />
+      ) : (
+         <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-800 text-gray-500">
+            <CameraOff size={48} className="mb-4 opacity-50" />
+            <p className="font-bold text-lg">Camera is Off</p>
+         </div>
+      )}
 
       {/* CV Loading Overlay */}
-      {!cvReady && (
+      {!cvReady && isCameraOn && (
         <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-80 z-20">
           <div className="text-white text-xl font-bold animate-pulse">
             Loading CV Engine...
@@ -522,6 +544,7 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
       )}
 
       {/* Control Bar */}
+      {isCameraOn && (
       <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-10">
         <div className="flex flex-col gap-2">
           <div className={`px-3 py-1 rounded-full text-xs font-bold w-fit ${isActive ? 'bg-red-600 animate-pulse' : 'bg-gray-600'}`}>
@@ -552,9 +575,10 @@ const CameraDetector: React.FC<CameraDetectorProps> = ({
           </button>
         </div>
       </div>
+      )}
 
       {/* Debug Info Panel */}
-      {debugMode && (
+      {debugMode && isCameraOn && (
         <div className="absolute bottom-4 left-4 right-4 bg-black/80 backdrop-blur-md rounded-lg p-3 text-white text-xs space-y-2 z-10 border border-gray-700">
           <div className="flex justify-between items-center">
             <span className="flex items-center gap-2">

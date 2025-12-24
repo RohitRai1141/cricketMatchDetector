@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Mic, Undo2, XCircle, Video, Trophy, Star, Lightbulb, Activity, ArrowRight, Save } from 'lucide-react';
+import { Mic, Undo2, XCircle, Video, Trophy, Star, Lightbulb, Activity, ArrowRight, Save, Camera, CameraOff } from 'lucide-react';
 import CameraDetector from './components/CameraDetector';
 import ScoreBoard from './components/ScoreBoard';
 import SetupScreen from './components/SetupScreen';
@@ -89,7 +89,8 @@ export default function App() {
   const [summary, setSummary] = useState<MatchSummaryData | string>('');
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [matchVideoBlob, setMatchVideoBlob] = useState<Blob | null>(null);
+  const [cameraOn, setCameraOn] = useState(true);
+  const [matchVideoBlobs, setMatchVideoBlobs] = useState<Blob[]>([]);
 
   useEffect(() => {
     const saved = localStorage.getItem('cricketMatchState');
@@ -121,10 +122,11 @@ export default function App() {
   const handleStartMatch = (config: Partial<MatchState>) => {
     setMatchState({ ...INITIAL_MATCH_STATE, ...config });
     setScreen(AppScreen.LIVE);
+    setMatchVideoBlobs([]); // Reset video for new match
   };
 
   const handleBallDetection = () => {
-    if (!pendingInput && !matchState.isMatchOver) {
+    if (!pendingInput && !matchState.isMatchOver && cameraOn) {
       if (navigator.vibrate) navigator.vibrate(200);
       setPendingInput(true);
     }
@@ -281,13 +283,16 @@ export default function App() {
     }, 500);
   };
 
-  const handleVideoAvailable = (blob: Blob) => {
-    setMatchVideoBlob(blob);
-  };
+  const handleVideoAvailable = useCallback((blob: Blob) => {
+    if (blob.size > 0) {
+        setMatchVideoBlobs(prev => [...prev, blob]);
+    }
+  }, []);
 
   const downloadVideo = () => {
-    if (!matchVideoBlob) return;
-    const url = URL.createObjectURL(matchVideoBlob);
+    if (matchVideoBlobs.length === 0) return;
+    const combinedBlob = new Blob(matchVideoBlobs, { type: 'video/webm' });
+    const url = URL.createObjectURL(combinedBlob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `match-${new Date().toISOString()}.webm`;
@@ -424,7 +429,7 @@ export default function App() {
         )}
 
         <div className="mt-8 space-y-3">
-          {matchVideoBlob && (
+          {matchVideoBlobs.length > 0 && (
             <button 
               onClick={downloadVideo}
               className="w-full bg-gray-700 hover:bg-gray-600 border border-gray-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95"
@@ -435,7 +440,7 @@ export default function App() {
 
           <button 
             onClick={() => {
-                setMatchVideoBlob(null);
+                setMatchVideoBlobs([]);
                 setScreen(AppScreen.SETUP);
             }}
             className="w-full bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/50 py-4 rounded-xl font-bold transition-all active:scale-95"
@@ -457,6 +462,15 @@ export default function App() {
            {matchState.isMatchOver ? 'Match Result' : 'Live Match'}
         </h1>
         <div className="flex gap-2">
+           {/* Camera Toggle Button */}
+           <button 
+             onClick={() => setCameraOn(!cameraOn)} 
+             className={`p-2 rounded-full ${cameraOn ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}
+             title={cameraOn ? "Turn Camera Off" : "Turn Camera On"}
+           >
+              {cameraOn ? <Camera size={18} /> : <CameraOff size={18} />}
+           </button>
+
            <button onClick={() => setVoiceEnabled(!voiceEnabled)} className={`p-2 rounded-full ${voiceEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-700 text-gray-400'}`}>
               <Mic size={18} />
            </button>
@@ -475,11 +489,12 @@ export default function App() {
         <ScoreBoard state={matchState} />
         
         {/* Camera Container - Increased Height */}
-        <div className="w-full h-[60vh] min-h-[300px] shrink-0 shadow-2xl">
+        <div className="w-full h-[60vh] min-h-[300px] shrink-0 shadow-2xl relative bg-black rounded-xl overflow-hidden">
             <CameraDetector 
                 isActive={!matchState.isMatchOver && !pendingInput} 
                 onMotionDetected={handleBallDetection} 
                 onVideoAvailable={handleVideoAvailable}
+                isCameraOn={cameraOn}
             />
         </div>
 
@@ -493,7 +508,7 @@ export default function App() {
                     + Add Score Manually
                 </button>
                 <p className="text-xs text-gray-500 mt-2">
-                    Camera is monitoring...
+                    {cameraOn ? "Camera is monitoring..." : "Camera paused. Manual entry only."}
                 </p>
             </div>
         )}
